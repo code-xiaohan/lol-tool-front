@@ -1,7 +1,23 @@
 import React, { useState, useEffect } from 'react';
-import { Card, Avatar, Button, Alert, Spin, Row, Col } from 'antd';
-import { UserOutlined, TrophyOutlined } from '@ant-design/icons';
+import { Card, Avatar, Button, Alert, Spin, Row, Col, message, Tooltip } from 'antd';
+import { UserOutlined, TrophyOutlined, CopyOutlined } from '@ant-design/icons';
 import axios from 'axios';
+
+const copyToClipboard = async (text) => {
+  try {
+    await navigator.clipboard.writeText(text);
+    message.success('已复制召唤师名');
+  } catch (e) {
+    // 兼容较老浏览器
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); message.success('已复制召唤师名'); }
+    catch { message.error('复制失败'); }
+    finally { document.body.removeChild(ta); }
+  }
+};
 
 // 统一格式化游戏时间（目前右侧不再展示，但保留以便后续扩展）
 function formatGameTime(input) {
@@ -109,19 +125,32 @@ const PersonalInfo = () => {
         const players = (game.participants || []).map((pt) => {
           const id = (game.participantIdentities || []).find((pi) => pi.participantId === pt.participantId);
           const s = pt.stats || {};
+
+          // 组装 riot 名称
+          const gameName = id?.player?.gameName || id?.player?.summonerName || `Player ${pt.participantId}`;
+          const tagLine = id?.player?.tagLine || '';
+          const riotName = tagLine ? `${gameName}#${tagLine}` : gameName;
+
           const itemPictures = [s.item0Picture, s.item1Picture, s.item2Picture, s.item3Picture, s.item4Picture, s.item5Picture, s.item6Picture].filter(Boolean);
+
           return {
             teamId: pt.teamId,
-            summonerName: id?.player?.summonerName || `Player ${pt.participantId}`,
+            summonerName: gameName,              // 保留原字段，避免其他地方引用报错
+            gameName,
+            tagLine,
+            riotName,                            // ✅ gameName#tagLine
             champion: pt.championId,
             championPicture: pt.championPicture || '',
             kills: s.kills || 0, deaths: s.deaths || 0, assists: s.assists || 0,
             level: s.champLevel || 1,
             items: [s.item0, s.item1, s.item2, s.item3, s.item4, s.item5, s.item6].filter((x) => x && x !== 0),
             itemPictures,
-            spells: [{ id: pt.spell1Id, picture: pt.spell1Picture }, { id: pt.spell2Id, picture: pt.spell2Picture }].filter((sp) => sp.id),
+            spells: [
+              { id: pt.spell1Id, picture: pt.spell1Picture },
+              { id: pt.spell2Id, picture: pt.spell2Picture }
+            ].filter(sp => sp.id),
             goldEarned: s.goldEarned || 0,
-            totalDamageDealt: s.totalDamageDealtToChampions || 0,
+            totalDamageDealt: s.totalDamageDealtToChampions || 0, // 字符串也能被 Number() 解析（下方 formatK 已兼容）
             isWin: s.win === true,
           };
         });
@@ -150,9 +179,11 @@ const PersonalInfo = () => {
   const renderPlayerRow = (p) => {
     const kda = `${p.kills}/${p.deaths}/${p.assists}`;
     const kdar = p.deaths > 0 ? ((p.kills + p.assists) / p.deaths).toFixed(2) : '∞';
+    const displayName = p.riotName || p.summonerName;
+
     return (
         <div
-            key={`${p.teamId}-${p.summonerName}-${p.champion}`}
+            key={`${p.teamId}-${displayName}-${p.champion}`}
             style={{
               display: 'grid',
               gridTemplateColumns: '1fr 120px 100px 120px',
@@ -170,18 +201,52 @@ const PersonalInfo = () => {
                 onError={(e) => { if (e && e.target) e.target.src = 'https://ddragon.leagueoflegends.com/cdn/15.19.1/img/champion/0.png'; }}
             />
             <div style={{ marginLeft: 10, minWidth: 0, flex: 1 }}>
-              <div style={{ fontWeight: 600, fontSize: 14, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', lineHeight: '20px' }} title={p.summonerName}>
-                {p.summonerName}
+              {/* 名称 + 复制 */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+              <span
+                  style={{
+                    fontWeight: 600,
+                    fontSize: 14,
+                    whiteSpace: 'nowrap',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    lineHeight: '20px',
+                    minWidth: 0,
+                    color: '#e8eaed'
+                  }}
+                  title={displayName}
+              >
+                {displayName}
+              </span>
+                <Tooltip title="复制">
+                  <Button
+                      type="text"
+                      size="small"
+                      icon={<CopyOutlined />}
+                      onClick={() => copyToClipboard(displayName)}
+                  />
+                </Tooltip>
               </div>
+
               <div style={{ display: 'flex', alignItems: 'center', marginTop: 6, gap: 6, flexWrap: 'wrap' }}>
+                {/* 技能（优先使用后端图片） */}
                 <div style={{ display: 'flex', gap: 4 }}>
                   {p.spells?.map((sp, i) => (
-                      <Avatar key={i} size={18} src={sp.picture ? getImageUrl(sp.picture) : `/spells/${sp.id}.png`} onError={(e) => { if (e && e.target) e.target.src = `/spells/${sp.id}.png`; }} style={{ background: '#fff' }} />
+                      <Avatar
+                          key={i}
+                          size={18}
+                          src={sp.picture ? getImageUrl(sp.picture) : `/spells/${sp.id}.png`}
+                          onError={(e) => { if (e && e.target) e.target.src = `/spells/${sp.id}.png`; }}
+                          style={{ background: '#fff' }}
+                      />
                   ))}
                 </div>
+                {/* 出装（优先用后端返回的图片；缺失时回退到本地静态图） */}
                 <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
                   {p.itemPictures?.length
-                      ? p.itemPictures.map((pic, i) => <Avatar key={i} size={18} src={getImageUrl(pic)} style={{ background: '#fff' }} />)
+                      ? p.itemPictures.map((pic, i) => (
+                          <Avatar key={i} size={18} src={getImageUrl(pic)} style={{ background: '#fff' }} />
+                      ))
                       : p.items?.map((it, i) => <Avatar key={i} size={18} src={`/items/${it}.png`} />)}
                 </div>
               </div>
@@ -326,7 +391,7 @@ const PersonalInfo = () => {
             boxSizing: 'border-box',
             display: 'flex',
             flexDirection: 'column',
-            background: '#0b0f15',          // 更贴近客户端深色背景
+            background: '#0b0f15',          // 深色背景
           }}
       >
         <Row
@@ -392,7 +457,7 @@ const PersonalInfo = () => {
                         </Card>
                     )}
 
-                    {/* 战绩列表（收紧行高，更像原版） */}
+                    {/* 战绩列表 */}
                     {matchHistory.length > 0 ? (
                         <div>
                           {matchHistory.map((m) => (
