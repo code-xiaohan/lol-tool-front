@@ -1,330 +1,302 @@
-import React, { useState } from 'react';
-import { Card, Input, Button, Row, Col, Statistic, Table, Alert, Avatar, Tag, Empty, Spin } from 'antd';
-import { SearchOutlined, UserOutlined, TrophyOutlined, FireOutlined, StarOutlined } from '@ant-design/icons';
+import React, { useState, useMemo } from 'react';
+import {
+  Card, Form, Input, Button, Row, Col, Space, Typography, message,
+  Spin, Alert, List, Tag, Divider, Tooltip, Statistic, Empty
+} from 'antd';
+import { SearchOutlined, UserOutlined, TrophyOutlined, ClockCircleOutlined, CopyOutlined } from '@ant-design/icons';
 import axios from 'axios';
 
-const { Search } = Input;
+const { Title, Text } = Typography;
 
-const SearchPage = () => {
+// ======= 可按需修改 =======
+const API_BASE = '/api'; // 例如 Nginx 代理到后端时使用的前缀
+const api = axios.create({ baseURL: API_BASE, timeout: 20000 });
+
+/** 工具：格式化时长（秒 -> mm:ss） */
+function formatDuration(sec) {
+  if (sec == null || isNaN(sec)) return '-';
+  const s = Math.max(0, Math.round(sec));
+  const mm = Math.floor(s / 60).toString().padStart(2, '0');
+  const ss = (s % 60).toString().padStart(2, '0');
+  return `${mm}:${ss}`;
+}
+
+/** 工具：时间戳友好展示（毫秒/秒 兼容） */
+function formatTime(ts) {
+  if (!ts) return '-';
+  const ms = ts > 1e12 ? ts : ts * 1000;
+  const d = new Date(ms);
+  const yyyy = d.getFullYear();
+  const MM = String(d.getMonth() + 1).padStart(2, '0');
+  const DD = String(d.getDate()).padStart(2, '0');
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return `${yyyy}-${MM}-${DD} ${hh}:${mm}`;
+}
+
+/** 工具：KDA 文案 */
+function kdaText(kills, deaths, assists) {
+  const k = Number(kills || 0), d = Number(deaths || 0), a = Number(assists || 0);
+  const ratio = d === 0 ? (k + a) : (k + a) / d;
+  return `${k}/${d}/${a}  (${ratio.toFixed(2)} KDA)`;
+}
+
+/** 工具：拷贝 */
+async function copyToClipboard(text) {
+  try {
+    await navigator.clipboard?.writeText(text);
+    message.success('已复制');
+  } catch {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      message.success('已复制');
+      document.body.removeChild(ta);
+    } catch {
+      message.error('复制失败');
+    }
+  }
+}
+
+/** 统一解析后端包装：兼容 {code,data,msg} / {success,data,message} 等 */
+function unwrap(res) {
+  // axios 返回：res.data 是后端 Result
+  const payload = res?.data;
+  if (!payload) return { ok: false, data: null, msg: '无响应体' };
+
+  // 常见规范兜底：code===200 或 success===true
+  const code = payload.code ?? payload.status ?? null;
+  const ok = payload.success === true || code === 200 || code === 0;
+  const msg = payload.message || payload.msg || payload.error || '';
+  return { ok, data: payload.data ?? payload.result ?? null, msg };
+}
+
+/**
+ * 假定 MatchHistoryVO 结构（根据你之前的页面推断）：
+ * {
+ *   playerInfo: { gameName, tagLine, summonerLevel, profileIconId, puuid, ... },
+ *   matches: [
+ *     {
+ *       matchId, queueType, gameStartTimestamp, gameDuration,
+ *       win, championName, kills, deaths, assists, cs, gold, damage, position, ...
+ *     }, ...
+ *   ],
+ *   summary: { total, wins, losses, winRate, mvpCount, ... } // 可选
+ * }
+ * 下面渲染时都做了健壮性判断；字段缺失也能正常显示基础信息。
+ */
+
+const PlayerHeader = ({ info, summary }) => {
+  const nameText = info ? `${info.gameName || '-'}#${info.tagLine || '-'}` : '-';
+  const level = info?.summonerLevel ?? '-';
+
+  return (
+      <Card bordered style={{ marginTop: 16 }}>
+        <Row gutter={[16, 16]} align="middle">
+          <Col flex="none">
+            <UserOutlined style={{ fontSize: 40 }} />
+          </Col>
+          <Col flex="auto">
+            <Space direction="vertical" size={4}>
+              <Space align="center">
+                <Title level={4} style={{ margin: 0 }}>{nameText}</Title>
+                <Tooltip title="复制召唤师名#tag">
+                  <Button size="small" icon={<CopyOutlined />} onClick={() => copyToClipboard(nameText)} />
+                </Tooltip>
+              </Space>
+              <Text type="secondary">等级：{level}</Text>
+            </Space>
+          </Col>
+          <Col flex="none">
+            <Space size="large" wrap>
+              <Statistic title="对局数" value={summary?.total ?? '-'} />
+              <Statistic title="胜场" value={summary?.wins ?? '-'} />
+              <Statistic title="败场" value={summary?.losses ?? '-'} />
+              <Statistic title="胜率" value={summary?.winRate != null ? `${summary.winRate}%` : '-'} />
+            </Space>
+          </Col>
+        </Row>
+      </Card>
+  );
+};
+
+const MatchItem = ({ m }) => {
+  const win = !!m?.win;
+  const resultTag = win ? <Tag color="green">胜利</Tag> : <Tag color="red">失败</Tag>;
+  const champ = m?.championName || '未知英雄';
+  const queue = m?.queueType || '未知模式';
+  const start = formatTime(m?.gameStartTimestamp);
+  const dur = formatDuration(m?.gameDuration);
+  const pos = m?.position || m?.lane || '';
+  const kda = kdaText(m?.kills, m?.deaths, m?.assists);
+
+  return (
+      <Card size="small">
+        <Row gutter={[12, 8]} align="middle">
+          <Col xs={24} md={6}>
+            <Space wrap>
+              <Tag icon={<TrophyOutlined />} color="blue">{queue}</Tag>
+              {resultTag}
+              {pos ? <Tag>{pos}</Tag> : null}
+            </Space>
+            <div style={{ marginTop: 6 }}>
+              <Text type="secondary"><ClockCircleOutlined /> {start} · {dur}</Text>
+            </div>
+          </Col>
+          <Col xs={24} md={8}>
+            <Space direction="vertical" size={2}>
+              <Text strong>{champ}</Text>
+              <Text>{kda}</Text>
+            </Space>
+          </Col>
+          <Col xs={24} md={10}>
+            <Space size="large" wrap>
+              {'cs' in m ? <Text>补刀：{m.cs}</Text> : null}
+              {'gold' in m ? <Text>金币：{m.gold}</Text> : null}
+              {'damage' in m ? <Text>伤害：{m.damage}</Text> : null}
+              {'visionScore' in m ? <Text>视野：{m.visionScore}</Text> : null}
+            </Space>
+          </Col>
+        </Row>
+      </Card>
+  );
+};
+
+const MatchList = ({ matches }) => {
+  if (!matches || matches.length === 0) {
+    return <Empty description="暂无对局" style={{ marginTop: 24 }} />;
+  }
+  return (
+      <List
+          style={{ marginTop: 16 }}
+          grid={{ gutter: 12, column: 1 }}
+          dataSource={matches}
+          renderItem={(m) => (
+              <List.Item key={m?.matchId || Math.random()}>
+                <MatchItem m={m} />
+              </List.Item>
+          )}
+      />
+  );
+};
+
+const PlayerRecordSearch = () => {
+  const [form] = Form.useForm();
   const [loading, setLoading] = useState(false);
-  const [searchText, setSearchText] = useState('');
-  const [playerInfo, setPlayerInfo] = useState(null);
-  const [matchHistory, setMatchHistory] = useState([]);
-  const [alertMessage, setAlertMessage] = useState(null);
-  const [alertType, setAlertType] = useState('success');
-  const [searched, setSearched] = useState(false);
+  const [errorMsg, setErrorMsg] = useState('');
+  const [data, setData] = useState(null); // MatchHistoryVO
 
-  // 搜索玩家信息
-  const handleSearch = async (value) => {
-    if (!value.trim()) {
-      setAlertMessage('请输入玩家名称！');
-      setAlertType('error');
+  const summary = useMemo(() => {
+    const matches = data?.matches || [];
+    if (!matches.length) return { total: 0, wins: 0, losses: 0, winRate: 0 };
+    const wins = matches.filter(m => !!m?.win).length;
+    const losses = matches.length - wins;
+    const winRate = Math.round((wins / matches.length) * 100);
+    return { total: matches.length, wins, losses, winRate };
+  }, [data]);
+
+  const handleSearch = async (values) => {
+    const { gameName, tagLine } = values || {};
+    if (!gameName || !tagLine) {
+      message.warning('请填写召唤师名字与 tagLine');
       return;
     }
 
+    setErrorMsg('');
     setLoading(true);
-    setAlertMessage(null);
-    setSearched(true);
-    
+    setData(null);
     try {
-      // 搜索玩家基本信息
-      const playerResponse = await axios.get(`http://localhost:8080/player/search?name=${encodeURIComponent(value)}`);
-      
-      if (playerResponse.data.code === 200) {
-        const playerData = playerResponse.data.data;
-        setPlayerInfo(playerData);
-        setAlertMessage(`找到玩家：${playerData.summonerName}`);
-        setAlertType('success');
-        
-        // 获取该玩家的对战历史
-        try {
-          const matchResponse = await axios.get(`http://localhost:8080/player/matches?summonerId=${playerData.summonerId}`);
-          if (matchResponse.data.code === 200) {
-            setMatchHistory(matchResponse.data.data || []);
-          }
-        } catch (matchError) {
-          console.error('获取对战历史失败:', matchError);
-          setMatchHistory([]);
-        }
-      } else {
-        setAlertMessage('未找到该玩家，请检查玩家名称是否正确！');
-        setAlertType('error');
-        setPlayerInfo(null);
-        setMatchHistory([]);
+      // 用 x-www-form-urlencoded 传参，符合 @RequestParam 的绑定
+      const body = new URLSearchParams({ gameName, tagLine });
+      const res = await api.post('/history/player/match', body, {
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      });
+      const { ok, data, msg } = unwrap(res);
+      if (!ok) {
+        setErrorMsg(msg || '查询失败');
+        return;
       }
-    } catch (error) {
-      console.error('搜索玩家失败:', error);
-      setAlertMessage('搜索失败！请检查网络连接或玩家名称。');
-      setAlertType('error');
-      setPlayerInfo(null);
-      setMatchHistory([]);
+      if (!data) {
+        setErrorMsg('未查询到数据');
+        return;
+      }
+      setData(data);
+    } catch (e) {
+      setErrorMsg(e?.response?.data?.message || e?.message || '请求失败');
     } finally {
       setLoading(false);
     }
   };
 
-  // 对战历史表格列定义
-  const matchColumns = [
-    {
-      title: '游戏模式',
-      dataIndex: 'gameMode',
-      key: 'gameMode',
-      render: (mode) => <Tag color="blue">{mode}</Tag>
-    },
-    {
-      title: '英雄',
-      dataIndex: 'champion',
-      key: 'champion',
-      render: (champion) => (
-        <div style={{ display: 'flex', alignItems: 'center' }}>
-          <Avatar size="small" src={`/champions/${champion}.png`} />
-          <span style={{ marginLeft: 8 }}>{champion}</span>
-        </div>
-      )
-    },
-    {
-      title: '胜负',
-      dataIndex: 'win',
-      key: 'win',
-      render: (win) => (
-        <Tag color={win ? 'green' : 'red'}>
-          {win ? '胜利' : '失败'}
-        </Tag>
-      )
-    },
-    {
-      title: 'K/D/A',
-      key: 'kda',
-      render: (_, record) => `${record.kills}/${record.deaths}/${record.assists}`
-    },
-    {
-      title: '游戏时长',
-      dataIndex: 'gameDuration',
-      key: 'gameDuration',
-      render: (duration) => {
-        const minutes = Math.floor(duration / 60);
-        const seconds = duration % 60;
-        return `${minutes}:${seconds.toString().padStart(2, '0')}`;
-      }
-    },
-    {
-      title: '游戏时间',
-      dataIndex: 'gameTime',
-      key: 'gameTime',
-      render: (time) => new Date(time).toLocaleString()
-    }
-  ];
-
   return (
-    <div style={{ padding: '24px' }}>
-      <Row gutter={[24, 24]}>
-        {/* 搜索区域 */}
-        <Col span={24}>
-          <Card title="搜索玩家">
-            <Row gutter={[16, 16]} align="middle">
-              <Col span={16}>
-                <Search
-                  placeholder="请输入玩家名称"
-                  size="large"
-                  value={searchText}
-                  onChange={(e) => setSearchText(e.target.value)}
-                  onSearch={handleSearch}
-                  loading={loading}
-                  enterButton={
-                    <Button type="primary" icon={<SearchOutlined />} loading={loading}>
-                      搜索
-                    </Button>
-                  }
-                />
-              </Col>
-              <Col span={8}>
-                <div style={{ color: '#666', fontSize: '14px' }}>
-                  💡 支持搜索召唤师名称
-                </div>
-              </Col>
-            </Row>
-          </Card>
-        </Col>
+      <div style={{ padding: 16 }}>
+        <Card>
+          <Form
+              form={form}
+              layout="inline"
+              onFinish={handleSearch}
+              initialValues={{ gameName: '', tagLine: '' }}
+          >
+            <Form.Item
+                name="gameName"
+                label="召唤师名字"
+                rules={[{ required: true, message: '请输入召唤师名字（gameName）' }]}
+            >
+              <Input
+                  allowClear
+                  placeholder="如：Faker"
+                  style={{ width: 240 }}
+              />
+            </Form.Item>
+            <Form.Item
+                name="tagLine"
+                label="tagLine"
+                rules={[{ required: true, message: '请输入 tagLine（#后面的数字/字母）' }]}
+            >
+              <Input
+                  allowClear
+                  placeholder="如：KR1"
+                  style={{ width: 200 }}
+              />
+            </Form.Item>
+            <Form.Item>
+              <Space>
+                <Button type="primary" htmlType="submit" icon={<SearchOutlined />}>
+                  查询
+                </Button>
+                <Button onClick={() => { form.resetFields(); setData(null); setErrorMsg(''); }}>
+                  重置
+                </Button>
+              </Space>
+            </Form.Item>
+          </Form>
 
-        {/* 提示信息 */}
-        {alertMessage && (
-          <Col span={24}>
-            <Alert
-              message={alertMessage}
-              type={alertType}
-              showIcon
-              closable
-              onClose={() => setAlertMessage(null)}
-            />
-          </Col>
-        )}
-
-        {/* 加载状态 */}
-        {loading && (
-          <Col span={24}>
-            <Card>
-              <div style={{ textAlign: 'center', padding: '40px' }}>
-                <Spin size="large" />
-                <p style={{ marginTop: '16px' }}>正在搜索玩家信息...</p>
+          {loading && (
+              <div style={{ marginTop: 16 }}>
+                <Spin tip="查询中..." />
               </div>
-            </Card>
-          </Col>
-        )}
+          )}
 
-        {/* 玩家信息 */}
-        {!loading && playerInfo && (
-          <Col span={24}>
-            <Card 
-              title={
-                <div style={{ display: 'flex', alignItems: 'center' }}>
-                  <UserOutlined style={{ marginRight: 8 }} />
-                  玩家信息
-                </div>
-              }
-            >
-              <Row gutter={[24, 24]}>
-                {/* 基本信息 */}
-                <Col span={24}>
-                  <Card size="small" title="基本信息">
-                    <Row gutter={[16, 16]}>
-                      <Col span={6}>
-                        <div style={{ textAlign: 'center' }}>
-                          <Avatar size={80} src={playerInfo.profileIconUrl} />
-                          <div style={{ marginTop: '8px', fontWeight: 'bold' }}>
-                            {playerInfo.summonerName}
-                          </div>
-                          <div style={{ color: '#666', fontSize: '12px' }}>
-                            {playerInfo.summonerLevel}级
-                          </div>
-                        </div>
-                      </Col>
-                      <Col span={18}>
-                        <Row gutter={[16, 16]}>
-                          <Col span={8}>
-                            <Statistic
-                              title="当前段位"
-                              value={playerInfo.tier || '未定级'}
-                              prefix={<TrophyOutlined />}
-                            />
-                          </Col>
-                          <Col span={8}>
-                            <Statistic
-                              title="胜点"
-                              value={playerInfo.leaguePoints || 0}
-                              suffix="LP"
-                            />
-                          </Col>
-                          <Col span={8}>
-                            <Statistic
-                              title="排位胜率"
-                              value={playerInfo.winRate || 0}
-                              suffix="%"
-                              precision={1}
-                            />
-                          </Col>
-                        </Row>
-                      </Col>
-                    </Row>
-                  </Card>
-                </Col>
+          {!!errorMsg && !loading && (
+              <div style={{ marginTop: 16 }}>
+                <Alert type="error" message={errorMsg} showIcon />
+              </div>
+          )}
+        </Card>
 
-                {/* 统计信息 */}
-                <Col span={24}>
-                  <Card size="small" title="排位统计">
-                    <Row gutter={[16, 16]}>
-                      <Col span={6}>
-                        <Statistic
-                          title="总场次"
-                          value={playerInfo.totalGames || 0}
-                          prefix={<FireOutlined />}
-                        />
-                      </Col>
-                      <Col span={6}>
-                        <Statistic
-                          title="胜场"
-                          value={playerInfo.wins || 0}
-                          valueStyle={{ color: '#3f8600' }}
-                        />
-                      </Col>
-                      <Col span={6}>
-                        <Statistic
-                          title="负场"
-                          value={playerInfo.losses || 0}
-                          valueStyle={{ color: '#cf1322' }}
-                        />
-                      </Col>
-                      <Col span={6}>
-                        <Statistic
-                          title="胜率"
-                          value={playerInfo.winRate || 0}
-                          suffix="%"
-                          precision={1}
-                          prefix={<StarOutlined />}
-                        />
-                      </Col>
-                    </Row>
-                  </Card>
-                </Col>
-              </Row>
-            </Card>
-          </Col>
+        {/* 查询结果 */}
+        {data && !loading && (
+            <>
+              <PlayerHeader info={data.playerInfo} summary={data.summary ?? summary} />
+              <Divider />
+              <MatchList matches={data.matches} />
+            </>
         )}
-
-        {/* 对战历史 */}
-        {!loading && playerInfo && (
-          <Col span={24}>
-            <Card 
-              title={
-                <div style={{ display: 'flex', alignItems: 'center' }}>
-                  <TrophyOutlined style={{ marginRight: 8 }} />
-                  最近对战记录
-                </div>
-              }
-            >
-              <Table
-                columns={matchColumns}
-                dataSource={matchHistory}
-                rowKey="gameId"
-                pagination={{
-                  pageSize: 10,
-                  showSizeChanger: true,
-                  showQuickJumper: true,
-                  showTotal: (total) => `共 ${total} 条记录`
-                }}
-                locale={{
-                  emptyText: '暂无对战记录'
-                }}
-              />
-            </Card>
-          </Col>
-        )}
-
-        {/* 空状态 */}
-        {!loading && searched && !playerInfo && (
-          <Col span={24}>
-            <Card>
-              <Empty
-                image={<SearchOutlined style={{ fontSize: '64px', color: '#d9d9d9' }} />}
-                description="未找到玩家信息"
-              />
-            </Card>
-          </Col>
-        )}
-
-        {/* 初始状态 */}
-        {!loading && !searched && (
-          <Col span={24}>
-            <Card>
-              <Empty
-                image={<SearchOutlined style={{ fontSize: '64px', color: '#d9d9d9' }} />}
-                description="请输入玩家名称进行搜索"
-              />
-            </Card>
-          </Col>
-        )}
-      </Row>
-    </div>
+      </div>
   );
 };
 
-export default SearchPage;
+export default PlayerRecordSearch;

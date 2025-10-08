@@ -1,331 +1,242 @@
-import React, { useState, useEffect } from 'react';
-import { Card, Row, Col, Table, Button, Alert, Spin, Avatar, Tag, Statistic, Tabs } from 'antd';
-import { PlayCircleOutlined, UserOutlined, TrophyOutlined, TeamOutlined, FireOutlined } from '@ant-design/icons';
+import React, { useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
+import { Card, Row, Col, Avatar, Skeleton, message, Tooltip } from 'antd';
+import { CopyOutlined } from '@ant-design/icons';
 
-const InGame = () => {
-  const [loading, setLoading] = useState(false);
-  const [gameInfo, setGameInfo] = useState(null);
-  const [players, setPlayers] = useState([]);
-  const [alertMessage, setAlertMessage] = useState(null);
-  const [alertType, setAlertType] = useState('success');
-  const [autoRefresh, setAutoRefresh] = useState(false);
+/** 后端接口地址 */
+const API_URL = 'http://localhost:8080/current/match/details';
 
-  // 获取游戏中信息
-  const fetchGameInfo = async () => {
-    setLoading(true);
-    setAlertMessage(null);
-    try {
-      const response = await axios.get('http://localhost:8080/game/current');
-      if (response.data.code === 200) {
-        const gameData = response.data.data;
-        setGameInfo(gameData);
-        setPlayers(gameData.players || []);
-        setAlertMessage('游戏信息加载成功！');
-        setAlertType('success');
-      } else {
-        setAlertMessage('当前不在游戏中或获取游戏信息失败！');
-        setAlertType('error');
-        setGameInfo(null);
-        setPlayers([]);
-      }
-    } catch (error) {
-      console.error('获取游戏信息失败:', error);
-      setAlertMessage('获取游戏信息失败！请确保已连接LCU客户端且正在游戏中。');
-      setAlertType('error');
-      setGameInfo(null);
-      setPlayers([]);
-    } finally {
-      setLoading(false);
-    }
-  };
+/** Riot ID 复制 */
+const copyText = async (text) => {
+  try {
+    await navigator.clipboard.writeText(text);
+    message.success('已复制');
+  } catch {
+    message.error('复制失败');
+  }
+};
 
-  // 自动刷新
-  useEffect(() => {
-    let interval;
-    if (autoRefresh) {
-      interval = setInterval(fetchGameInfo, 5000); // 每5秒刷新一次
-    }
-    return () => {
-      if (interval) {
-        clearInterval(interval);
-      }
+/** 图片数据转 URL：支持 dataURL/http/base64/ArrayBuffer/Int8Array/[-128,127] 数组 */
+const getImageUrl = (imageData) => {
+  if (!imageData) return '';
+  if (typeof imageData === 'string') {
+    if (imageData.startsWith('data:image')) return imageData;
+    if (imageData.startsWith('http')) return imageData;
+    if (/^[A-Za-z0-9+/=]+$/.test(imageData.slice(0, 50))) return `data:image/png;base64,${imageData}`;
+    return imageData;
+  }
+  let u8;
+  if (imageData instanceof Uint8Array) u8 = imageData;
+  else if (imageData instanceof ArrayBuffer) u8 = new Uint8Array(imageData);
+  else if (Array.isArray(imageData)) u8 = new Uint8Array(imageData.map((n) => (n < 0 ? n + 256 : n)));
+  else return '';
+
+  const sig = u8.slice(0, 12);
+  const isPNG = sig[0] === 0x89 && sig[1] === 0x50 && sig[2] === 0x4e && sig[3] === 0x47;
+  const isJPG = sig[0] === 0xff && sig[1] === 0xd8;
+  const isGIF = sig[0] === 0x47 && sig[1] === 0x49 && sig[2] === 0x46;
+  const isWEBP = sig[0] === 0x52 && sig[1] === 0x49 && sig[2] === 0x46 && sig[3] === 0x46 && sig[8] === 0x57 && sig[9] === 0x45 && sig[10] === 0x42 && sig[11] === 0x50;
+  const mime = isJPG ? 'image/jpeg' : isGIF ? 'image/gif' : isWEBP ? 'image/webp' : isPNG ? 'image/png' : 'image/png';
+  return URL.createObjectURL(new Blob([u8], { type: mime }));
+};
+
+/** 角色顺序：上、打野、中、AD、辅 */
+const ROLE_ORDER = { TOP: 0, JUNGLE: 1, MIDDLE: 2, BOTTOM: 3, ADC: 3, CARRY: 3, UTILITY: 4, SUPPORT: 4 };
+const roleIndex = (pos) => (pos && ROLE_ORDER[pos.toUpperCase()] !== undefined ? ROLE_ORDER[pos.toUpperCase()] : 99);
+
+/** 从一局 Game 中提取该玩家的 KDA（优先按 puuid；否则用 gameName#tagLine；再不行兜底第 1 位） */
+const extractKdaForPlayer = (game, { puuid, gameName, tagLine }) => {
+  if (!game) return null;
+
+  const identities = game.participantIdentities || [];
+  const participants = game.participants || [];
+
+  // 1) puuid 匹配
+  let pid = null;
+  if (puuid) {
+    const hit = identities.find((pi) => pi?.player?.puuid && pi.player.puuid === puuid);
+    if (hit) pid = hit.participantId;
+  }
+  // 2) Riot ID 匹配
+  if (!pid && (gameName || tagLine)) {
+    const hit = identities.find(
+        (pi) =>
+            pi?.player &&
+            ((gameName && pi.player.gameName === gameName) ||
+                (pi.player.summonerName && pi.player.summonerName === gameName)) &&
+            (tagLine ? pi.player.tagLine === tagLine : true)
+    );
+    if (hit) pid = hit.participantId;
+  }
+  // 3) 兜底：第一个参与者
+  if (!pid && participants.length) pid = participants[0].participantId;
+
+  const me = participants.find((p) => p.participantId === pid);
+  const st = me?.stats || {};
+  if (me) {
+    return {
+      kills: st.kills ?? 0,
+      deaths: st.deaths ?? 0,
+      assists: st.assists ?? 0,
+      win: !!st.win,
+      championId: me.championId,
     };
-  }, [autoRefresh]);
+  }
+  return null;
+};
 
-  // 玩家表格列定义
-  const playerColumns = [
-    {
-      title: '位置',
-      dataIndex: 'position',
-      key: 'position',
-      render: (position) => {
-        const positionColors = {
-          'TOP': 'red',
-          'JUNGLE': 'orange',
-          'MID': 'blue',
-          'ADC': 'green',
-          'SUPPORT': 'purple'
-        };
-        return <Tag color={positionColors[position] || 'default'}>{position}</Tag>;
-      }
-    },
-    {
-      title: '英雄',
-      dataIndex: 'champion',
-      key: 'champion',
-      render: (champion) => (
-        <div style={{ display: 'flex', alignItems: 'center' }}>
-          <Avatar size="small" src={`/champions/${champion}.png`} />
-          <span style={{ marginLeft: 8 }}>{champion}</span>
-        </div>
-      )
-    },
-    {
-      title: '召唤师',
-      dataIndex: 'summonerName',
-      key: 'summonerName',
-      render: (name, record) => (
-        <div>
-          <div style={{ fontWeight: 'bold' }}>{name}</div>
-          {record.isCurrentPlayer && (
-            <Tag color="gold" size="small">当前玩家</Tag>
-          )}
-        </div>
-      )
-    },
-    {
-      title: '段位',
-      dataIndex: 'tier',
-      key: 'tier',
-      render: (tier, record) => (
-        <div>
-          <div>{tier || '未定级'}</div>
-          {record.rank && <div style={{ fontSize: '12px', color: '#666' }}>{record.rank}</div>}
-        </div>
-      )
-    },
-    {
-      title: '胜点',
-      dataIndex: 'leaguePoints',
-      key: 'leaguePoints',
-      render: (lp) => lp ? `${lp} LP` : '-'
-    },
-    {
-      title: '胜率',
-      dataIndex: 'winRate',
-      key: 'winRate',
-      render: (rate) => rate ? `${rate.toFixed(1)}%` : '-'
-    }
-  ];
+/** 把一队玩家按固定顺序排列，并补齐 5 位 */
+const orderAndPad = (players) => {
+  const arr = [...players].sort((a, b) => roleIndex(a.position) - roleIndex(b.position));
+  while (arr.length < 5) arr.push(null);
+  return arr.slice(0, 5);
+};
 
-  // 按队伍分组显示玩家
-  const renderTeamPlayers = (teamId, teamName) => {
-    const teamPlayers = players.filter(player => player.teamId === teamId);
-    
-    return (
-      <div>
-        <h4 style={{ marginBottom: '16px', color: teamId === 100 ? '#1890ff' : '#f5222d' }}>
-          {teamName} ({teamPlayers.length}人)
-        </h4>
-        <Table
-          columns={playerColumns}
-          dataSource={teamPlayers}
-          rowKey="summonerId"
-          pagination={false}
-          size="small"
-          locale={{
-            emptyText: '暂无玩家信息'
-          }}
-        />
-      </div>
-    );
-  };
-
-  // 游戏统计信息
-  const renderGameStats = () => {
-    if (!gameInfo) return null;
-
-    const blueTeamPlayers = players.filter(p => p.teamId === 100);
-    const redTeamPlayers = players.filter(p => p.teamId === 200);
-
-    return (
-      <Row gutter={[16, 16]}>
-        <Col span={12}>
-          <Card size="small" title="蓝队统计" style={{ borderColor: '#1890ff' }}>
-            <Row gutter={[8, 8]}>
-              <Col span={12}>
-                <Statistic
-                  title="平均段位"
-                  value={blueTeamPlayers.length > 0 ? 
-                    blueTeamPlayers.reduce((sum, p) => sum + (p.leaguePoints || 0), 0) / blueTeamPlayers.length : 0
-                  }
-                  precision={0}
-                  suffix="LP"
-                />
-              </Col>
-              <Col span={12}>
-                <Statistic
-                  title="平均胜率"
-                  value={blueTeamPlayers.length > 0 ? 
-                    blueTeamPlayers.reduce((sum, p) => sum + (p.winRate || 0), 0) / blueTeamPlayers.length : 0
-                  }
-                  precision={1}
-                  suffix="%"
-                />
-              </Col>
-            </Row>
-          </Card>
-        </Col>
-        <Col span={12}>
-          <Card size="small" title="红队统计" style={{ borderColor: '#f5222d' }}>
-            <Row gutter={[8, 8]}>
-              <Col span={12}>
-                <Statistic
-                  title="平均段位"
-                  value={redTeamPlayers.length > 0 ? 
-                    redTeamPlayers.reduce((sum, p) => sum + (p.leaguePoints || 0), 0) / redTeamPlayers.length : 0
-                  }
-                  precision={0}
-                  suffix="LP"
-                />
-              </Col>
-              <Col span={12}>
-                <Statistic
-                  title="平均胜率"
-                  value={redTeamPlayers.length > 0 ? 
-                    redTeamPlayers.reduce((sum, p) => sum + (p.winRate || 0), 0) / redTeamPlayers.length : 0
-                  }
-                  precision={1}
-                  suffix="%"
-                />
-              </Col>
-            </Row>
-          </Card>
-        </Col>
-      </Row>
-    );
-  };
-
+const SlotSkeleton = ({ tone = 'blue' }) => {
+  const bg = tone === 'blue' ? 'rgba(24,144,255,0.12)' : 'rgba(255,77,79,0.12)';
+  const br = tone === 'blue' ? 'rgba(24,144,255,0.35)' : 'rgba(255,77,79,0.35)';
   return (
-    <div style={{ padding: '24px' }}>
-      <Row gutter={[24, 24]}>
-        {/* 游戏信息卡片 */}
-        <Col span={24}>
-          <Card 
-            title={
-              <div style={{ display: 'flex', alignItems: 'center' }}>
-                <PlayCircleOutlined style={{ marginRight: 8 }} />
-                当前游戏信息
-              </div>
-            }
-            extra={
-              <div>
-                <Button 
-                  type="primary" 
-                  onClick={fetchGameInfo}
-                  loading={loading}
-                  style={{ marginRight: 8 }}
-                >
-                  刷新
-                </Button>
-                <Button 
-                  type={autoRefresh ? 'primary' : 'default'}
-                  onClick={() => setAutoRefresh(!autoRefresh)}
-                >
-                  {autoRefresh ? '停止自动刷新' : '自动刷新'}
-                </Button>
-              </div>
-            }
-          >
-            {alertMessage && (
-              <Alert
-                message={alertMessage}
-                type={alertType}
-                showIcon
-                closable
-                onClose={() => setAlertMessage(null)}
-                style={{ marginBottom: '20px' }}
-              />
-            )}
-
-            {loading ? (
-              <div style={{ textAlign: 'center', padding: '40px' }}>
-                <Spin size="large" />
-                <p style={{ marginTop: '16px' }}>正在获取游戏信息...</p>
-              </div>
-            ) : gameInfo ? (
-              <div>
-                {/* 游戏基本信息 */}
-                <Card size="small" title="游戏详情" style={{ marginBottom: '24px' }}>
-                  <Row gutter={[16, 16]}>
-                    <Col span={6}>
-                      <Statistic
-                        title="游戏模式"
-                        value={gameInfo.gameMode || '未知'}
-                        prefix={<TeamOutlined />}
-                      />
-                    </Col>
-                    <Col span={6}>
-                      <Statistic
-                        title="地图"
-                        value={gameInfo.mapName || '未知'}
-                      />
-                    </Col>
-                    <Col span={6}>
-                      <Statistic
-                        title="游戏时长"
-                        value={gameInfo.gameTime || '00:00'}
-                      />
-                    </Col>
-                    <Col span={6}>
-                      <Statistic
-                        title="玩家数量"
-                        value={players.length}
-                        suffix="/10"
-                      />
-                    </Col>
-                  </Row>
-                </Card>
-
-                {/* 队伍统计 */}
-                {renderGameStats()}
-
-                {/* 玩家信息 */}
-                <Card size="small" title="玩家信息" style={{ marginTop: '24px' }}>
-                  <Tabs defaultActiveKey="all">
-                    <Tabs.TabPane tab="全部玩家" key="all">
-                      <Table
-                        columns={playerColumns}
-                        dataSource={players}
-                        rowKey="summonerId"
-                        pagination={false}
-                        locale={{
-                          emptyText: '暂无玩家信息'
-                        }}
-                      />
-                    </Tabs.TabPane>
-                    <Tabs.TabPane tab="蓝队" key="blue">
-                      {renderTeamPlayers(100, '蓝队')}
-                    </Tabs.TabPane>
-                    <Tabs.TabPane tab="红队" key="red">
-                      {renderTeamPlayers(200, '红队')}
-                    </Tabs.TabPane>
-                  </Tabs>
-                </Card>
-              </div>
-            ) : (
-              <div style={{ textAlign: 'center', padding: '40px', color: '#999' }}>
-                <PlayCircleOutlined style={{ fontSize: '48px', marginBottom: '16px' }} />
-                <p>当前不在游戏中</p>
-                <p style={{ fontSize: '14px' }}>请确保已连接LCU客户端且正在游戏中</p>
-              </div>
-            )}
-          </Card>
-        </Col>
-      </Row>
-    </div>
+      <div style={{ background: bg, border: `1px solid ${br}`, borderRadius: 8, padding: 12, height: 280 }}>
+        <Skeleton.Avatar active shape="circle" size={48} />
+        <div style={{ marginTop: 12 }}>
+          <Skeleton active paragraph={{ rows: 6 }} title={{ width: '60%' }} />
+        </div>
+      </div>
   );
 };
 
-export default InGame;
+const PlayerCard = ({ data, tone = 'blue' }) => {
+  if (!data) return <SlotSkeleton tone={tone} />;
+
+  const riotId = [data.gameName, data.tagLine].filter(Boolean).join('#');
+  const champUrl = getImageUrl(data.championPicture);
+  const sp1 = getImageUrl(data.spell1Picture);
+  const sp2 = getImageUrl(data.spell2Picture);
+
+  // 最近 8 场 KDA
+  const history = (data.game || []).slice(0, 8).map((g) => extractKdaForPlayer(g, data));
+
+  const bg = tone === 'blue' ? 'rgba(24,144,255,0.10)' : 'rgba(255,77,79,0.10)';
+  const br = tone === 'blue' ? 'rgba(24,144,255,0.30)' : 'rgba(255,77,79,0.30)';
+
+  return (
+      <div style={{ background: bg, border: `1px solid ${br}`, borderRadius: 8, padding: 12, height: 280, display: 'flex', flexDirection: 'column' }}>
+        {/* 头像 + 名字 + 复制 */}
+        <div style={{ display: 'flex', alignItems: 'center', marginBottom: 10 }}>
+          <Avatar size={48} src={champUrl || undefined} />
+          <div style={{ marginLeft: 10, minWidth: 0, flex: 1 }}>
+            <div style={{ fontWeight: 700, fontSize: 14, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={riotId}>
+              {riotId || '未知玩家'}
+              {riotId && (
+                  <Tooltip title="复制 Riot ID">
+                    <CopyOutlined style={{ marginLeft: 6 }} onClick={() => copyText(riotId)} />
+                  </Tooltip>
+              )}
+            </div>
+            <div style={{ fontSize: 12, opacity: 0.75 }}>{data.position || '-'}</div>
+          </div>
+          {/* 召唤师技能 */}
+          <div style={{ display: 'flex', gap: 6 }}>
+            {sp1 ? <Avatar size={22} shape="square" src={sp1} /> : <Skeleton.Avatar size={22} shape="square" active />}
+            {sp2 ? <Avatar size={22} shape="square" src={sp2} /> : <Skeleton.Avatar size={22} shape="square" active />}
+          </div>
+        </div>
+
+        {/* 最近战绩（K/D/A） */}
+        <div style={{ flex: 1, overflow: 'hidden' }}>
+          <div style={{ fontSize: 12, opacity: 0.75, marginBottom: 6 }}>最近对局</div>
+          <div style={{ height: 'calc(100% - 22px)', overflow: 'auto' }}>
+            {history.length > 0 ? (
+                history.map((h, idx) =>
+                    h ? (
+                        <div key={idx} style={{ display: 'flex', alignItems: 'center', fontSize: 12, marginBottom: 6 }}>
+                          <div style={{ width: 6, height: 6, borderRadius: '50%', background: h.win ? '#52c41a' : '#ff4d4f', marginRight: 8 }} />
+                          <span style={{ fontWeight: 600, marginRight: 6 }}>{h.kills}/{h.deaths}/{h.assists}</span>
+                          <span style={{ opacity: 0.7 }}>K/D/A</span>
+                        </div>
+                    ) : (
+                        <div key={idx} style={{ marginBottom: 6, opacity: 0.6 }}>--/--/--</div>
+                    )
+                )
+            ) : (
+                <div style={{ opacity: 0.6 }}>暂无历史对局</div>
+            )}
+          </div>
+        </div>
+      </div>
+  );
+};
+
+const TeamRow = ({ players, tone = 'blue' }) => {
+  const ordered = useMemo(() => orderAndPad(players), [players]);
+  return (
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 16 }}>
+        {ordered.map((p, i) => (
+            <div key={i}>
+              <PlayerCard data={p} tone={tone} />
+            </div>
+        ))}
+      </div>
+  );
+};
+
+const CurrentMatchBoard = () => {
+  const [loading, setLoading] = useState(false);
+  const [list, setList] = useState([]);
+
+  useEffect(() => {
+    const load = async () => {
+      setLoading(true);
+      try {
+        const { data } = await axios.get(API_URL);
+        if (data?.code === 200) {
+          setList(Array.isArray(data.data) ? data.data : []);
+        } else if (Array.isArray(data)) {
+          // 直接就是数组
+          setList(data);
+        } else {
+          message.error('获取对局详情失败');
+        }
+      } catch {
+        message.error('网络错误，无法获取对局详情');
+      } finally {
+        setLoading(false);
+      }
+    };
+    load();
+  }, []);
+
+  // 假设后端按蓝队→红队顺序返回。若不是，请在后端保证顺序或给 VO 增加 teamId。
+  const half = Math.ceil(list.length / 2);
+  const blueTeam = list.slice(0, 5);                // 蓝队最多 5 个
+  const redTeam = list.slice(5, 10);                // 红队最多 5 个
+  // 兜底：如果不是 10 人，也能正常铺满
+  while (blueTeam.length < 5 && list.length > 5 && blueTeam.length < half) blueTeam.push(null);
+  while (redTeam.length < 5) redTeam.push(null);
+
+  return (
+      <div style={{ padding: 16, height: '100vh', boxSizing: 'border-box', background: '#0b0f15', overflow: 'auto' }}>
+        <Card
+            title={<div style={{ color: '#fff', fontWeight: 700 }}>当前对局</div>}
+            bordered={false}
+            style={{ background: 'transparent' }}
+            headStyle={{ background: 'transparent', borderBottom: 'none' }}
+            bodyStyle={{ padding: 0 }}
+            loading={loading}
+        >
+          {/* 上方：蓝队 */}
+          <div style={{ marginBottom: 12, color: 'rgba(255,255,255,0.85)', fontWeight: 700 }}>蓝方</div>
+          <TeamRow players={blueTeam} tone="blue" />
+
+          {/* 分割留白 */}
+          <div style={{ height: 18 }} />
+
+          {/* 下方：红队 */}
+          <div style={{ marginBottom: 12, color: 'rgba(255,255,255,0.85)', fontWeight: 700 }}>红方</div>
+          <TeamRow players={redTeam} tone="red" />
+        </Card>
+      </div>
+  );
+};
+
+export default CurrentMatchBoard;
